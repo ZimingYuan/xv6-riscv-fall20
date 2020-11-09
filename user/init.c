@@ -14,6 +14,7 @@ char *argv[] = { "sh", 0 };
 int
 main(void)
 {
+    printf("fuck\n");
   int pid, wpid;
 
   if(open("console", O_RDWR) < 0){
