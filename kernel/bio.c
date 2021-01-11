@@ -23,14 +23,17 @@
 #include "fs.h"
 #include "buf.h"
 
+#define BNUM 17
+
 struct {
   struct spinlock lock;
+  struct spinlock block[BNUM];
   struct buf buf[NBUF];
 
   // Linked list of all buffers, through prev/next.
   // Sorted by how recently the buffer was used.
   // head.next is most recent, head.prev is least.
-  struct buf head;
+  struct buf head[BNUM];
 } bcache;
 
 void
@@ -41,14 +44,17 @@ binit(void)
   initlock(&bcache.lock, "bcache");
 
   // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
+  for (int i = 0; i < BNUM; i++) {
+      initlock(bcache.block + i, "bcache");
+      bcache.head[i].prev = &bcache.head[i];
+      bcache.head[i].next = &bcache.head[i];
+  }
   for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
+    b->next = bcache.head[0].next;
+    b->prev = &bcache.head[0];
     initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    bcache.head[0].next->prev = b;
+    bcache.head[0].next = b;
   }
 }
 
@@ -60,31 +66,58 @@ bget(uint dev, uint blockno)
 {
   struct buf *b;
 
-  acquire(&bcache.lock);
+  int entry = blockno % BNUM;
+  acquire(bcache.block + entry);
 
   // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+  for(b = bcache.head[entry].next; b != &bcache.head[entry]; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
-      release(&bcache.lock);
+      release(bcache.block + entry);
       acquiresleep(&b->lock);
       return b;
     }
   }
+
 
   // Not cached.
   // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
-      b->dev = dev;
-      b->blockno = blockno;
-      b->valid = 0;
-      b->refcnt = 1;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
-    }
+  for (int i = (entry + 1) % BNUM; i != entry; i = (i + 1) % BNUM) {
+      uint minticks = 0x3fffffff; struct buf *minbuf = 0;
+      acquire(bcache.block + i);
+      for(b = bcache.head[i].prev; b != &bcache.head[i]; b = b->prev)
+          if (b->refcnt == 0 && b->ticks < minticks) {
+              minticks = b->ticks; minbuf = b;
+          }
+      if (minbuf != 0) {
+          minbuf->dev = dev;
+          minbuf->blockno = blockno;
+          minbuf->valid = 0;
+          minbuf->refcnt = 1;
+          minbuf->next->prev = minbuf->prev;
+          minbuf->prev->next = minbuf->next;
+          minbuf->next = bcache.head[entry].next;
+          minbuf->prev = &bcache.head[entry];
+          bcache.head[entry].next->prev = minbuf;
+          bcache.head[entry].next = minbuf;
+          release(bcache.block + i);
+          release(bcache.block + entry);
+          acquiresleep(&minbuf->lock);
+          return minbuf;
+      }
+      release(bcache.block + i);
   }
+  // for(b = bcache.head[entry].prev; b != &bcache.head[entry]; b = b->prev){
+  //   if(b->refcnt == 0) {
+  //     b->dev = dev;
+  //     b->blockno = blockno;
+  //     b->valid = 0;
+  //     b->refcnt = 1;
+  //     release(&bcache.lock);
+  //     acquiresleep(&b->lock);
+  //     return b;
+  //   }
+  // }
   panic("bget: no buffers");
 }
 
@@ -121,19 +154,18 @@ brelse(struct buf *b)
 
   releasesleep(&b->lock);
 
-  acquire(&bcache.lock);
+  int entry = b->blockno % BNUM;
+  acquire(bcache.block + entry);
   b->refcnt--;
-  if (b->refcnt == 0) {
+  if (b->refcnt == 0) b->ticks = ticks;
     // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
-  }
-  
-  release(&bcache.lock);
+    // b->next->prev = b->prev;
+    // b->prev->next = b->next;
+    // b->next = bcache.head[entry].next;
+    // b->prev = &bcache.head[entry];
+    // bcache.head[entry].next->prev = b;
+    // bcache.head[entry].next = b;
+  release(bcache.block + entry);
 }
 
 void
