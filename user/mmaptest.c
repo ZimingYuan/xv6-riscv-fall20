@@ -284,6 +284,7 @@ fork_test(void)
   wait(&status);
 
   if(status != 0){
+      printf("%d\n", status);
     printf("fork_test failed\n");
     exit(1);
   }
