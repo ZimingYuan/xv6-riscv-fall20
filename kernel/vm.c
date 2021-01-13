@@ -169,10 +169,10 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     panic("uvmunmap: not aligned");
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
-    if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
-    if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+    if((pte = walk(pagetable, a, 0)) == 0) continue;
+      // panic("uvmunmap: walk");
+    if((*pte & PTE_V) == 0) continue;
+      // panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -428,4 +428,42 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+void mmapunmap(pagetable_t pagetable, uint64 sz) {
+  uint64 a;
+  pte_t *pte;
+
+  for(a = 1L << 37; a < (1L << 37) + sz; a += PGSIZE){
+    if((pte = walk(pagetable, a, 0)) == 0) continue;
+    if((*pte & PTE_V) == 0) continue;
+    uint64 pa = PTE2PA(*pte);
+    kfree((void*)pa);
+    *pte = 0;
+  }
+}
+
+int mmapcopy(pagetable_t old, pagetable_t new, uint64 sz) {
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+  char *mem;
+
+  for(i = 1L << 37; i < (1L << 37) + sz; i += PGSIZE) {
+    if((pte = walk(old, i, 0)) == 0) continue;
+    if((*pte & PTE_V) == 0) continue;
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte);
+    if((mem = kalloc()) == 0)
+      goto err;
+    memmove(mem, (char*)pa, PGSIZE);
+    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+      kfree(mem);
+      goto err;
+    }
+  }
+  return 0;
+
+ err:
+  uvmunmap(new, i, (i - (1L << 37)) >> PGSHIFT, 1);
+  return -1;
 }

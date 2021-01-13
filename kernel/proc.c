@@ -147,7 +147,7 @@ freeproc(struct proc *p)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
   if(p->pagetable)
-    proc_freepagetable(p->pagetable, p->sz);
+    proc_freepagetable(p->pagetable, p->sz, p->mmapsz);
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -157,6 +157,8 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->mmapsz = 0;
+  for (int i = 0; i < 16; i++) p->vmas[i].valid = 0;
 }
 
 // Create a user page table for a given process,
@@ -195,10 +197,11 @@ proc_pagetable(struct proc *p)
 // Free a process's page table, and free the
 // physical memory it refers to.
 void
-proc_freepagetable(pagetable_t pagetable, uint64 sz)
+proc_freepagetable(pagetable_t pagetable, uint64 sz, uint64 mmapsz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
+  uvmunmap(pagetable, 1L << 37, mmapsz >> PGSHIFT, 1);
   uvmfree(pagetable, sz);
 }
 
@@ -280,7 +283,16 @@ fork(void)
     release(&np->lock);
     return -1;
   }
+  if(mmapcopy(p->pagetable, np->pagetable, p->mmapsz) < 0){
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
   np->sz = p->sz;
+  np->mmapsz = p->mmapsz;
+  for (int i = 0; i < 16; i++) if (p->vmas[i].valid) {
+      np->vmas[i] = p->vmas[i]; filedup(np->vmas[i].fd);
+  }
 
   np->parent = p;
 
